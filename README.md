@@ -51,6 +51,10 @@ ollama pull llama3.2-vision
 ```
 3. Ensure the server is accessible at `http://localhost:11434`.
 
+> [!TIP]
+> **Error: ollama server not responding?**
+> This means the service isn't running. Open a **new Termux session** and run `ollama serve`. Leave it running in the background and switch back to your original session to continue.
+
 ### 4. Messaging Channel Setup (Headless Control)
 To control OpenMobile via Telegram, you need to set up a Bot and get API credentials.
 

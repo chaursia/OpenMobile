@@ -72,6 +72,9 @@ Install [Ollama](https://ollama.com) in Termux or on a networked PC, then:
 ollama pull qwen2.5:0.5b    # Planner — ~400 MB
 ollama pull moondream        # Vision Actor — ~1.7 GB
 ```
+> [!TIP]
+> Use Ollama on a PC instead of the phone if device have less than 6 GB RAM
+
 
 > [!TIP]
 > If Ollama is running on a PC instead of the phone, set `OLLAMA_URL=http://<pc-ip>:11434` in your `.env`.
@@ -194,6 +197,7 @@ OpenMobile/
 | Agent taps wrong spot | Enable `--debug` to see Vision Actor's screen description |
 | `TG_API_ID missing` | Copy `.env.example` to `.env` and fill in credentials |
 | `moondream not found` | Run `ollama pull moondream` |
+| Any error while running `/goal <Task>` (connection failed etc) | It might by crashing due to low RAM . Run ollama On PC & update .env file|
 
 ---
 

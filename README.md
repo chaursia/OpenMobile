@@ -1,108 +1,215 @@
-# OpenMobile - Headless Autonomous Agent
+# OpenMobile v2.0 — Headless Autonomous Android Agent
 
-OpenMobile is a Python-based autonomous agent designed to control Android devices locally via ADB and Termux, with remote control support through **Telegram** and **WhatsApp**.
+OpenMobile is a Python-based autonomous agent that controls an Android device locally via ADB and Termux, with remote control support through **Telegram** and **WhatsApp**.
 
-## Core Features
-- **Headless Mode:** Receives commands via messaging apps and reports back status/screenshots.
-- **Local Brain:** Uses `llama3.2` and `llama3.2-vision` via Ollama.
-- **Cross-App Logic:** Capable of orchestration (e.g., "Copy text from Email and paste to WhatsApp").
-- **Security:** Authorized users whitelist.
+It uses **two lightweight AI models running in collaboration** — a Planner and a Vision Actor — to understand your commands, read the screen, and execute actions.
+
+---
+
+## ✨ What's New in v2.0
+
+| Feature | Details |
+|---|---|
+| **Dual-Model Architecture** | `qwen2.5:0.5b` (Planner) + `moondream` (Vision Actor) work together per step |
+| **Screen-aware agent** | Vision Actor analyses every screenshot before the Planner decides |
+| **Session memory** | Agent remembers past steps — no infinite loops |
+| **Retry logic** | Automatic retry with backoff on step failure |
+| **Termux TUI Dashboard** | `python main.py --dashboard` — setup status, usage guide, creator info |
+| **More actions** | `long_press`, `back`, `home`, `recent_apps`, `clear_text`, `whatsapp_send` |
+| **WhatsApp polling** | Receive commands via WhatsApp notification monitoring |
+| **`.env` support** | Copy `.env.example` → `.env` instead of exporting variables manually |
+
+---
+
+## 🧠 How It Works (Dual-Model Loop)
+
+Each step of the agent loop:
+
+```
+1. Capture screenshot (ADB screencap)
+         │
+         ▼
+2. moondream (Vision Actor) — analyses screenshot
+   → "Search bar visible, 4 app icons on home screen"
+   → Suggested element + coordinates
+         │
+         ▼
+3. qwen2.5:0.5b (Planner) — reads screen description + history
+   → Thought: "I need to open YouTube via the app drawer"
+   → Action: open_app(com.google.android.youtube)
+   → Confidence: 0.92
+         │
+         ▼
+4. Consensus:
+   confidence ≥ 0.70 → use Planner's action as-is
+   confidence < 0.70 → keep Planner's action type, use Vision's coordinates
+         │
+         ▼
+5. Execute via ADB → record step in memory → repeat
+```
 
 ---
 
 ## 🚀 Setup Instructions
 
-### 1. Termux Environment Setup
-First, ensure your Termux environment is up to date and has the necessary permissions.
+### 1. Termux Environment
 
 ```bash
 pkg update && pkg upgrade
 pkg install android-tools termux-api python
 termux-setup-storage
-```
 
-Clone the repository and install Python dependencies:
-```bash
 git clone https://github.com/chaursia/OpenMobile.git
 cd OpenMobile
 pip install -r requirements.txt
 ```
 
-### 2. ADB Configuration (Crucial)
-OpenMobile uses ADB to control your phone. You must enable **Developer Options** and **USB Debugging** on your Android device.
+### 2. Pull AI Models (Ollama)
 
-#### Connection Methods:
-- **USB:** Connect to a PC, run `adb devices` to authorize.
-- **On-Device (Wireless ADB):** 
-  1. Enable **Wireless Debugging** in Developer Options.
-  2. Use the "Pair device" option to get a port and pairing code.
-  3. In Termux, run: `adb pair ipaddr:port` followed by `adb connect ipaddr:port`.
+Install [Ollama](https://ollama.com) in Termux or on a networked PC, then:
 
-> [!IMPORTANT]
-> Some devices require "USB Debugging (Security Settings)" to be enabled for ADB to simulate taps/swipes.
-
-### 3. Ollama (The Brain)
-OpenMobile requires a local Ollama server. 
-1. Install Ollama in Termux (or run it on a networked PC).
-2. Pull the required models:
 ```bash
-ollama pull llama3.2:3b
-ollama pull llama3.2-vision
+ollama pull qwen2.5:0.5b    # Planner — ~400 MB
+ollama pull moondream        # Vision Actor — ~1.7 GB
 ```
-3. Ensure the server is accessible at `http://localhost:11434`.
 
 > [!TIP]
-> **Error: ollama server not responding?**
-> This means the service isn't running. Open a **new Termux session** and run `ollama serve`. Leave it running in the background and switch back to your original session to continue.
+> If Ollama is running on a PC instead of the phone, set `OLLAMA_URL=http://<pc-ip>:11434` in your `.env`.
 
-### 4. Messaging Channel Setup (Headless Control)
-To control OpenMobile via Telegram, you need to set up a Bot and get API credentials.
+### 3. ADB Configuration
 
-#### Step 4a: Get Telegram API Credentials
-1. Go to [my.telegram.org](https://my.telegram.org) and create an "App" to get your `API_ID` and `API_HASH`.
-2. Message [@BotFather](https://t.me/botfather) on Telegram to create a new bot and get your `BOT_TOKEN`.
-3. Message [@userinfobot](https://t.me/userinfobot) to get your own `USER_ID`.
+Enable **Developer Options** → **USB Debugging** on your Android device.
 
-#### Step 4b: Set Environment Variables
+**Wireless ADB (recommended for Termux):**
+1. Enable **Wireless Debugging** in Developer Options
+2. Tap **Pair device with pairing code** — note the IP, port, and code
+3. In Termux: `adb pair <ip>:<port>` then `adb connect <ip>:<port>`
+
+> [!IMPORTANT]
+> Some devices require **USB Debugging (Security Settings)** for ADB to simulate taps/swipes.
+
+### 4. Environment Configuration
+
 ```bash
-export TG_API_ID='your_api_id'
-export TG_API_HASH='your_api_hash'
-export TG_BOT_TOKEN='your_bot_token'
-export ALLOWED_USERS='your_user_id' # Comma-separated list
+cp .env.example .env
+nano .env    # fill in your credentials
 ```
+
+Key variables:
+
+| Variable | Description |
+|---|---|
+| `TG_API_ID` / `TG_API_HASH` | From [my.telegram.org](https://my.telegram.org) |
+| `TG_BOT_TOKEN` | From [@BotFather](https://t.me/botfather) |
+| `ALLOWED_USERS` | Comma-separated Telegram user IDs (from [@userinfobot](https://t.me/userinfobot)) |
+| `OLLAMA_URL` | Default: `http://localhost:11434` |
+| `PLANNER_MODEL` | Default: `qwen2.5:0.5b` |
+| `VISION_MODEL` | Default: `moondream` |
 
 ---
 
 ## 🛠️ Usage
 
-### Headless Mode (Service)
-This mode starts the Telegram listener. You can then send commands to your bot from any device.
+### Dashboard (check setup status first!)
+
+```bash
+python main.py --dashboard
+```
+
+Shows ADB connection, Ollama status, model availability, config, usage guide, and creator info. Refreshes every 2 seconds.
+
+### CLI Mode (direct testing)
+
+```bash
+python main.py --goal "Open YouTube and search for lo-fi music"
+python main.py --goal "Set an alarm for 7 AM"
+python main.py --goal "Open WhatsApp and message Mom" --debug
+```
+
+### Headless Mode (Telegram controlled)
+
 ```bash
 python main.py --headless
 ```
-**Example Commands to send via Telegram:**
-- `/goal Open WhatsApp and send "Starting my day" to Mom`
-- `/goal Go to Instagram and find a photo of a cat`
 
-### CLI Mode (Direct)
-Use this for local testing without Telegram.
+Then send commands to your bot via Telegram:
+
+```
+/goal Open Instagram and like the first post
+/goal Go to Settings and enable Wi-Fi
+/status
+/help
+```
+
+### Headless + WhatsApp
+
 ```bash
-python main.py --goal "Open YouTube and search for Lo-fi"
+python main.py --headless --whatsapp
+```
+
+Send `/goal <task>` from WhatsApp — the agent polls notifications every 5 seconds.
+
+### CLI Options
+
+```
+--goal "..."          Run a single task directly
+--headless            Start Telegram listener
+--whatsapp            Enable WhatsApp polling (use with --headless)
+--dashboard           Show TUI dashboard
+--planner-model       Override planner model (default: qwen2.5:0.5b)
+--vision-model        Override vision model (default: moondream)  
+--max-steps N         Max steps per goal (default: 15)
+--debug               Verbose debug output
 ```
 
 ---
 
 ## 📂 Project Structure
-- `main.py`: Entry point for Headless and CLI modes.
-- `channels.py`: Telegram listener and WhatsApp monitoring gateway.
-- `agent.py`: Asynchronous Think-Act-Observe loop.
-- `vision.py`: Screen analysis and coordinate resolution.
-- `actions.py`: ADB command library (tap, swipe, scroll, apps).
+
+```
+OpenMobile/
+├── main.py          # Entry point
+├── agent.py         # Dual-model consensus loop
+├── planner.py       # Planner model (qwen2.5:0.5b)
+├── executor.py      # Vision Actor model (moondream)
+├── vision.py        # ADB screen capture + compression
+├── actions.py       # ADB action library
+├── channels.py      # Telegram + WhatsApp gateways
+├── dashboard.py     # Termux TUI dashboard
+├── memory.py        # Session step memory
+├── config.py        # Central config + env loading
+├── .env.example     # Config template
+├── requirements.txt
+└── test_modules.py  # 19 smoke tests
+```
+
+---
 
 ## ⚠️ Troubleshooting
-- **ADB Unauthorized:** Ensure you've clicked "Always allow from this computer" on your phone's ADB prompt.
-- **Ollama Timeout:** Ensure Ollama is running in the background. If running on a PC, update `main.py` with the PC's IP.
-- **Coordinates Offset:** If taps are missing, check if `vision.py` is detecting the correct resolution.
 
-## License
+| Problem | Fix |
+|---|---|
+| `adb: not found` | Run `pkg install android-tools` in Termux |
+| `Ollama not running` | Open a new Termux session and run `ollama serve` |
+| Agent taps wrong spot | Enable `--debug` to see Vision Actor's screen description |
+| `TG_API_ID missing` | Copy `.env.example` to `.env` and fill in credentials |
+| `moondream not found` | Run `ollama pull moondream` |
+
+---
+
+## 🧪 Running Tests
+
+```bash
+python test_modules.py
+# Ran 19 tests — OK ✅
+```
+
+---
+
+## 📄 License
+
 MIT
+
+---
+
+> Built with ❤️ at [neurodev.in](https://neurodev.in)

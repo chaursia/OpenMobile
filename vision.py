@@ -1,93 +1,97 @@
+"""
+vision.py — Screen capture and image processing for OpenMobile.
+
+Handles:
+  - ADB screencap and pull
+  - Image compression before sending to vision LLM
+  - Resolution auto-detection
+"""
 import subprocess
 import os
-import requests
 import base64
 from PIL import Image
-from io import BytesIO
+from config import log
+
 
 class VisionModule:
-    def __init__(self, ollama_url="http://localhost:11434", vision_model="llama3.2-vision"):
-        self.ollama_url = ollama_url
-        self.vision_model = vision_model
+    def __init__(self):
         self.screenshot_path = "screen.png"
-        self.compressed_path = "screen_compressed.png"
-        # Phone resolution (auto-detected via ADB or default)
+        self.compressed_path = "screen_compressed.jpg"
         self.resolution = self._get_device_resolution()
+        log(f"Vision module ready — device resolution: {self.resolution[0]}x{self.resolution[1]}", "INFO")
 
-    def _get_device_resolution(self):
-        """Detects the phone resolution via ADB."""
+    # ── Device Info ─────────────────────────────────────────────────────────────
+
+    def _get_device_resolution(self) -> tuple[int, int]:
+        """Auto-detects device resolution via ADB. Falls back to 1080x2400."""
         try:
-            result = subprocess.run(["adb", "shell", "wm", "size"], capture_output=True, text=True)
+            result = subprocess.run(
+                ["adb", "shell", "wm", "size"],
+                capture_output=True, text=True, timeout=10
+            )
             if "Physical size:" in result.stdout:
                 size_str = result.stdout.split(":")[-1].strip()
                 w, h = map(int, size_str.split("x"))
                 return (w, h)
-        except Exception:
-            pass
-        return (1080, 2400) # Default common resolution
+        except Exception as e:
+            log(f"Could not detect resolution via ADB: {e}", "WARN")
+        return (1080, 2400)
 
-    def capture_screen(self):
-        """Captures the Android screen via ADB and pulls it to the local directory."""
+    def is_adb_connected(self) -> bool:
+        """Returns True if at least one ADB device/emulator is connected."""
         try:
-            subprocess.run(["adb", "shell", "screencap", "-p", "/sdcard/screen.png"], check=True)
-            subprocess.run(["adb", "pull", "/sdcard/screen.png", self.screenshot_path], check=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"Error capturing screen: {e}")
+            result = subprocess.run(
+                ["adb", "devices"], capture_output=True, text=True, timeout=10
+            )
+            lines = [
+                l.strip() for l in result.stdout.splitlines()
+                if l.strip() and not l.startswith("List")
+            ]
+            return any("device" in l for l in lines)
+        except Exception:
             return False
 
-    def process_image(self, max_size=(1024, 1024), quality=80):
-        """Resizes and compresses for llama3.2-vision."""
-        if not os.path.exists(self.screenshot_path):
-            return None
-        
-        with Image.open(self.screenshot_path) as img:
-            img.thumbnail(max_size)
-            img.save(self.compressed_path, "JPEG", optimize=True, quality=quality)
-        
-        with open(self.compressed_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
+    # ── Screen Capture ───────────────────────────────────────────────────────────
 
-    def find_element(self, query, image_base64):
-        """Sends image to llama3.2-vision to get relative coordinates [x%, y%]."""
-        prompt = f"""
-        Analyze this screenshot. Find the "{query}".
-        Provide the center coordinates as percentages [x%, y%].
-        Example: If it's in the middle, respond "[50, 50]".
-        Respond ONLY with the [x, y] coordinates.
+    def capture_screen(self) -> bool:
+        """Captures the Android screen via ADB screencap and pulls it locally."""
+        try:
+            subprocess.run(
+                ["adb", "shell", "screencap", "-p", "/sdcard/screen.png"],
+                check=True, capture_output=True, timeout=30
+            )
+            subprocess.run(
+                ["adb", "pull", "/sdcard/screen.png", self.screenshot_path],
+                check=True, capture_output=True, timeout=30
+            )
+            log("Screen captured successfully.", "DEBUG")
+            return True
+        except subprocess.CalledProcessError as e:
+            log(f"ADB screencap failed: {e.stderr.decode(errors='ignore')}", "ERROR")
+            return False
+        except subprocess.TimeoutExpired:
+            log("ADB screencap timed out.", "ERROR")
+            return False
+
+    # ── Image Processing ─────────────────────────────────────────────────────────
+
+    def get_screenshot_b64(self, max_size: tuple = (1024, 1024), quality: int = 80) -> str | None:
         """
-        
-        payload = {
-            "model": self.vision_model,
-            "prompt": prompt,
-            "stream": False,
-            "images": [image_base64]
-        }
-        
+        Compresses the captured screenshot and returns it as a base64 string
+        suitable for the moondream vision model.
+        """
+        if not os.path.exists(self.screenshot_path):
+            log("Screenshot file not found for processing.", "WARN")
+            return None
         try:
-            response = requests.post(f"{self.ollama_url}/api/generate", json=payload)
-            response.raise_for_status()
-            result = response.json().get("response", "").strip()
-            return self._parse_and_scale_coords(result)
+            with Image.open(self.screenshot_path) as img:
+                img.thumbnail(max_size)
+                # Convert RGBA → RGB if needed (PNG may have alpha channel)
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                img.save(self.compressed_path, "JPEG", optimize=True, quality=quality)
+            with open(self.compressed_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
         except Exception as e:
-            print(f"Error calling Vision LLM: {e}")
+            log(f"Image processing failed: {e}", "ERROR")
             return None
-
-    def _parse_and_scale_coords(self, response_text):
-        """Converts [x%, y%] string to absolute [x, y] pixels."""
-        try:
-            # Simple [x, y] extraction
-            cleaned = response_text.replace("[", "").replace("]", "").replace("%", "").split(",")
-            rx, ry = map(float, cleaned)
-            
-            # Scale to actual resolution
-            abs_x = int((rx / 100.0) * self.resolution[0])
-            abs_y = int((ry / 100.0) * self.resolution[1])
-            return [abs_x, abs_y]
-        except Exception:
-            print(f"Failed to parse coordinates from: {response_text}")
-            return None
-
-if __name__ == "__main__":
-    vision = VisionModule()
-    print(f"Detected Resolution: {vision.resolution}")

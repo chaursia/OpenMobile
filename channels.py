@@ -1,91 +1,162 @@
-import subprocess
-import json
-import time
-import os
-from telethon import TelegramClient, events
+"""
+channels.py — Communication gateways for OpenMobile.
 
-# Configuration for Telegram (User needs to fill these in)
-API_ID = os.environ.get("TG_API_ID")
-API_HASH = os.environ.get("TG_API_HASH")
-BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
-ALLOWED_USERS = os.environ.get("ALLOWED_USERS", "").split(",")
+Supports:
+  - Telegram (bot via Telethon)
+  - WhatsApp (polling via Termux:API notifications)
+"""
+import asyncio
+import json
+import subprocess
+import time
+from config import (
+    TG_API_ID, TG_API_HASH, TG_BOT_TOKEN,
+    ALLOWED_USERS, WA_POLL_INTERVAL, log
+)
+
+try:
+    from telethon import TelegramClient, events
+    TELETHON_AVAILABLE = True
+except ImportError:
+    TELETHON_AVAILABLE = False
+    log("telethon not installed — Telegram support disabled.", "WARN")
+
 
 class CommunicationGateway:
     def __init__(self, agent_callback):
+        """
+        agent_callback(goal: str, report_func) → awaitable
+        report_func(text: str, image_path: str | None = None) → awaitable
+        """
         self.agent_callback = agent_callback
         self.tg_client = None
-        if API_ID and API_HASH and BOT_TOKEN:
-            self.tg_client = TelegramClient('openmobile_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+        self._wa_seen_ids: set = set()  # track processed WA notification IDs
+
+        if TELETHON_AVAILABLE and all([TG_API_ID, TG_API_HASH, TG_BOT_TOKEN]):
+            try:
+                self.tg_client = TelegramClient(
+                    "openmobile_session",
+                    int(TG_API_ID),
+                    TG_API_HASH,
+                )
+                log("Telegram client created.", "INFO")
+            except Exception as e:
+                log(f"Failed to create Telegram client: {e}", "ERROR")
+
+    # ── Telegram ──────────────────────────────────────────────────────────────
 
     async def start_telegram(self):
-        """Starts the Telegram listener."""
+        """Starts the Telegram bot listener."""
         if not self.tg_client:
-            print("Telegram credentials missing. Skipping Telegram listener.")
+            log("Telegram credentials missing or telethon not installed.", "WARN")
             return
+
+        await self.tg_client.start(bot_token=TG_BOT_TOKEN)
 
         @self.tg_client.on(events.NewMessage)
         async def handler(event):
-            sender_id = str(event.sender_id)
-            if sender_id not in ALLOWED_USERS:
-                await event.reply("Unauthorized user.")
+            sender_id = str(event.sender_id).strip()
+
+            # Security: allowlist check
+            if ALLOWED_USERS and sender_id not in ALLOWED_USERS:
+                await event.reply("🚫 Unauthorized. Contact the device owner.")
+                log(f"Rejected message from {sender_id}", "WARN")
                 return
 
-            msg_text = event.message.message
+            msg_text = event.message.message.strip()
+
             if msg_text.startswith("/goal "):
-                goal = msg_text[len("/goal "):]
-                await event.reply(f"Acknowledged. Starting task: {goal}")
-                
-                # Report callback to send updates back to TG
-                async def report(text, image_path=None):
-                    if image_path:
-                        await event.reply(text, file=image_path)
-                    else:
-                        await event.reply(text)
+                goal = msg_text[len("/goal "):].strip()
+                if not goal:
+                    await event.reply("⚠️ Usage: /goal <your task>")
+                    return
 
-                # Trigger Agent
-                await self.agent_callback(goal, report)
+                await event.reply(f"✅ Task received: {goal}\nStarting execution…")
 
-        print("Telegram listener active.")
+                async def report(text: str, image_path: str = None):
+                    try:
+                        if image_path:
+                            await event.reply(text, file=image_path)
+                        else:
+                            await event.reply(text)
+                    except Exception as e:
+                        log(f"TG report error: {e}", "WARN")
+
+                try:
+                    await self.agent_callback(goal, report)
+                except Exception as e:
+                    log(f"Agent error during TG task: {e}", "ERROR")
+                    await event.reply(f"❌ Agent error: {e}")
+
+            elif msg_text == "/status":
+                await event.reply("🤖 OpenMobile is online and ready.\nSend /goal <task> to start.")
+
+            elif msg_text == "/help":
+                await event.reply(
+                    "📖 *OpenMobile Help*\n\n"
+                    "/goal <task> — Execute a task on the device\n"
+                    "/status — Check if agent is online\n"
+                    "/help — Show this message\n\n"
+                    "Example: `/goal Open YouTube and search for lo-fi music`"
+                )
+            else:
+                await event.reply(
+                    "🤔 Unknown command. Try:\n"
+                    "/goal <task>\n/status\n/help"
+                )
+
+        log("Telegram listener active. Waiting for commands…", "SUCCESS")
         await self.tg_client.run_until_disconnected()
 
-    def check_whatsapp_notifications(self):
-        """
-        Monitors WhatsApp via termux-notification-list.
-        Note: This is a polling-based approach since Termux doesn't have a direct WA API.
-        """
+    # ── WhatsApp (Termux:API polling) ─────────────────────────────────────────
+
+    def _get_wa_notifications(self) -> list[dict]:
+        """Fetches WhatsApp notifications via termux-notification-list."""
         try:
-            result = subprocess.run(["termux-notification-list"], capture_output=True, text=True)
-            notifications = json.loads(result.stdout)
-            
-            for notif in notifications:
-                if notif.get("packageName") == "com.whatsapp":
-                    sender = notif.get("title")
-                    content = notif.get("content")
-                    
-                    if sender in ALLOWED_USERS:
-                        print(f"WhatsApp goal received from {sender}: {content}")
-                        return content
+            result = subprocess.run(
+                ["termux-notification-list"],
+                capture_output=True, text=True, timeout=10
+            )
+            notifications = json.loads(result.stdout or "[]")
+            return [n for n in notifications if n.get("packageName") == "com.whatsapp"]
         except Exception as e:
-            print(f"Error checking WA notifications: {e}")
-        return None
+            log(f"WA notification fetch error: {e}", "WARN")
+            return []
 
-    def send_whatsapp_reply(self, recipient, message):
+    async def start_whatsapp_polling(self):
         """
-        Replies to WhatsApp using ADB. 
-        Note: This requires the screen to be on and WA to be accessible, or using a background strategy.
-        Simplest version: Open WA, search for contact, type message.
+        Polls WhatsApp notifications every WA_POLL_INTERVAL seconds.
+        Triggers the agent when a new /goal message arrives from an allowed sender.
         """
-        print(f"Replying to WhatsApp ({recipient}): {message}")
-        # Implementation depends on the 'actions.py' module
-        pass
+        log(f"WhatsApp polling started (interval={WA_POLL_INTERVAL}s).", "INFO")
 
-if __name__ == "__main__":
-    # Example usage (standalone test)
-    async def mock_agent(goal, report_func):
-        await report_func(f"Processing: {goal}")
-        time.sleep(2)
-        await report_func("Task complete!")
+        while True:
+            notifs = self._get_wa_notifications()
+            for notif in notifs:
+                notif_id = notif.get("id", "")
+                if notif_id in self._wa_seen_ids:
+                    continue
+                self._wa_seen_ids.add(notif_id)
 
-    # gate = CommunicationGateway(mock_agent)
-    # import asyncio
-    # asyncio.run(gate.start_telegram())
+                sender = notif.get("title", "").strip()
+                content = notif.get("content", "").strip()
+
+                # Security: allowlist check (WA uses display names, not IDs)
+                if ALLOWED_USERS and sender not in ALLOWED_USERS:
+                    continue
+
+                if content.startswith("/goal "):
+                    goal = content[len("/goal "):].strip()
+                    if not goal:
+                        continue
+                    log(f"WhatsApp goal from {sender}: {goal}", "INFO")
+
+                    async def wa_report(text: str, image_path: str = None):
+                        log(f"[WA Report] {text}", "INFO")
+
+                    try:
+                        await self.agent_callback(goal, wa_report)
+                    except Exception as e:
+                        log(f"Agent error during WA task: {e}", "ERROR")
+
+            await asyncio.sleep(WA_POLL_INTERVAL)

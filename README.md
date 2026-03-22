@@ -56,7 +56,7 @@ Each step of the agent loop:
 
 ```bash
 pkg update && pkg upgrade
-pkg install android-tools termux-api python
+pkg install android-tools termux-api python libjpeg-turbo libpng
 termux-setup-storage
 
 git clone https://github.com/chaursia/OpenMobile.git
